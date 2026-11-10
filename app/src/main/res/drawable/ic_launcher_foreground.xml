@@ -1,10 +1,35 @@
-<?xml version="1.0" encoding="utf-8"?>
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+    <!-- Left page back shadow -->
+    <path
+        android:fillColor="#F3F4F6"
+        android:pathData="M28,34 C36,33 46,35 54,38 L54,76 C46,73 36,71 28,72 Z" />
+    <!-- Right page front -->
     <path
         android:fillColor="#FFFFFF"
-        android:pathData="M30,24h48c3.31,0 6,2.69 6,6v48c0,3.31 -2.69,6 -6,6H30c-3.31,0 -6,-2.69 -6,-6V30c0,-3.31 2.69,-6 6,-6zm4,14h40v4H34v-4zm0,12h40v4H34v-4zm0,12h26v4H34v-4z" />
+        android:pathData="M54,38 C62,35 72,33 80,34 L80,72 C72,71 62,73 54,76 Z" />
+    <!-- Spine line -->
+    <path
+        android:strokeColor="#D1D5DB"
+        android:strokeWidth="1.5"
+        android:pathData="M54,38 L54,76" />
+    <!-- Left page text lines -->
+    <path
+        android:strokeColor="#9CA3AF"
+        android:strokeWidth="1.8"
+        android:strokeLineCap="round"
+        android:pathData="M32,46 L50,47 M32,54 L50,55 M32,62 L46,63" />
+    <!-- Right page text lines -->
+    <path
+        android:strokeColor="#9CA3AF"
+        android:strokeWidth="1.8"
+        android:strokeLineCap="round"
+        android:pathData="M58,47 L76,46 M58,55 L76,54 M58,63 L70,62" />
+    <!-- Ribbon bookmark in Gold/Amber -->
+    <path
+        android:fillColor="#F59E0B"
+        android:pathData="M60,34 L68,34 L68,52 L64,48 L60,52 Z" />
 </vector>
