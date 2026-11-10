@@ -6,12 +6,13 @@ import androidx.core.text.HtmlCompat
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.FileInputStream
 import java.io.FileOutputStream
-import java.io.InputStream
 import java.net.URLDecoder
 import java.util.ArrayDeque
 import java.util.zip.ZipEntry
 import java.util.zip.ZipFile
+import java.util.zip.ZipInputStream
 import javax.xml.parsers.DocumentBuilderFactory
 
 data class ParsedBook(
@@ -23,7 +24,7 @@ data class ParsedBook(
 object EpubParser {
 
     /**
-     * Парсить EPUB файл за наданим Uri або File
+     * Безпечно парсить EPUB за наданим Uri
      */
     suspend fun parseFromUri(
         context: Context,
@@ -31,13 +32,64 @@ object EpubParser {
         chunkSize: Int = SmartSplitter.DEFAULT_CHUNK_SIZE,
         onProgress: (String) -> Unit = {}
     ): ParsedBook = withContext(Dispatchers.IO) {
-        onProgress("Копіювання файлу в захищене сховище...")
+        onProgress("Отримання доступу до файлу...")
+
         val tempFile = File(context.cacheDir, "import_active.epub")
-        context.contentResolver.openInputStream(uri)?.use { input ->
-            FileOutputStream(tempFile).use { output ->
-                input.copyTo(output)
+        if (tempFile.exists()) {
+            tempFile.delete()
+        }
+
+        var copiedBytes = 0L
+
+        // Спосіб 1: Через openInputStream
+        try {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                FileOutputStream(tempFile).use { output ->
+                    val buffer = ByteArray(64 * 1024)
+                    var read: Int
+                    while (input.read(buffer).also { read = it } != -1) {
+                        output.write(buffer, 0, read)
+                        copiedBytes += read
+                    }
+                    output.flush()
+                }
             }
-        } ?: throw IllegalArgumentException("Неможливо відкрити файл")
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
+
+        // Спосіб 2: Якщо потік дав 0 байт (наприклад, для хмарних провайдерів або спеціальних сховищ)
+        if (copiedBytes == 0L || tempFile.length() == 0L) {
+            try {
+                context.contentResolver.openFileDescriptor(uri, "r")?.use { pfd ->
+                    FileInputStream(pfd.fileDescriptor).use { fis ->
+                        FileOutputStream(tempFile).use { fos ->
+                            val buffer = ByteArray(64 * 1024)
+                            var read: Int
+                            while (fis.read(buffer).also { read = it } != -1) {
+                                fos.write(buffer, 0, read)
+                                copiedBytes += read
+                            }
+                            fos.flush()
+                        }
+                    }
+                }
+            } catch (e: Exception) {
+                e.printStackTrace()
+            }
+        }
+
+        if (!tempFile.exists() || tempFile.length() == 0L) {
+            throw IllegalStateException("Файл виявився порожнім (0 байт). Якщо він у хмарі (Google Drive/Telegram), збережіть його у пам'ять телефону перед відкриттям.")
+        }
+
+        // Перевірка магічних байтів ZIP ("PK" = 0x50, 0x4B)
+        val header = ByteArray(2)
+        FileInputStream(tempFile).use { it.read(header) }
+        val isZipHeader = header[0] == 0x50.toByte() && header[1] == 0x4B.toByte()
+        if (!isZipHeader) {
+            throw IllegalStateException("Файл не є архівом EPUB (відсутній сигнатурний заголовок PK). Можливо, файл пошкоджений або має інший формат.")
+        }
 
         parseFromFile(tempFile, chunkSize, onProgress)
     }
@@ -47,31 +99,70 @@ object EpubParser {
         chunkSize: Int = SmartSplitter.DEFAULT_CHUNK_SIZE,
         onProgress: (String) -> Unit = {}
     ): ParsedBook = withContext(Dispatchers.IO) {
-        onProgress("Розпакування EPUB архіву...")
-        val zip = ZipFile(file)
+        onProgress("Розпакування книги...")
+
+        val extractDir = File(file.parentFile, "epub_unpacked_${System.currentTimeMillis()}")
+        if (extractDir.exists()) extractDir.deleteRecursively()
+        extractDir.mkdirs()
 
         try {
+            // Використовуємо потокове розпакування ZipInputStream:
+            // Це повністю запобігає помилці "zip END header not found",
+            // яка виникає у ZipFile через нестандартні коментарі чи байти наприкінці файлу.
+            var extractedCount = 0
+            try {
+                ZipInputStream(FileInputStream(file).buffered()).use { zis ->
+                    var entry: ZipEntry? = zis.nextEntry
+                    while (entry != null) {
+                        val cleanName = entry.name.replace('\\', '/').trim().removePrefix("/")
+                        if (cleanName.isNotBlank()) {
+                            val targetFile = File(extractDir, cleanName)
+                            // Захист від Path Traversal
+                            if (targetFile.canonicalPath.startsWith(extractDir.canonicalPath)) {
+                                if (entry.isDirectory) {
+                                    targetFile.mkdirs()
+                                } else {
+                                    targetFile.parentFile?.mkdirs()
+                                    FileOutputStream(targetFile).use { fos ->
+                                        zis.copyTo(fos)
+                                    }
+                                    extractedCount++
+                                }
+                            }
+                        }
+                        zis.closeEntry()
+                        entry = zis.nextEntry
+                    }
+                }
+            } catch (e: Exception) {
+                // Якщо ZipInputStream зупинився на якомусь елементі, перевіряємо, чи є вже розпаковані файли
+                if (extractedCount == 0) {
+                    // Резервна спроба через звичайний ZipFile
+                    unpackViaZipFile(file, extractDir)
+                }
+            }
+
             // 1. Пошук container.xml
-            val containerEntry = findZipEntry(zip, "META-INF/container.xml")
-                ?: throw IllegalStateException("Файл META-INF/container.xml не знайдено (некоректний EPUB)")
+            onProgress("Пошук структури книги...")
+            val containerFile = findFile(extractDir, "META-INF/container.xml")
+                ?: throw IllegalStateException("Не знайдено META-INF/container.xml у книзі")
 
             val docBuilder = DocumentBuilderFactory.newInstance().newDocumentBuilder()
-            val containerDoc = zip.getInputStream(containerEntry).use { docBuilder.parse(it) }
+            val containerDoc = containerFile.inputStream().use { docBuilder.parse(it) }
 
             val rootfiles = containerDoc.getElementsByTagName("rootfile")
             if (rootfiles.length == 0) {
                 throw IllegalStateException("Не знайдено rootfile у container.xml")
             }
 
-            val opfPath = rootfiles.item(0).attributes?.getNamedItem("full-path")?.nodeValue
+            val opfRelativePath = rootfiles.item(0).attributes?.getNamedItem("full-path")?.nodeValue
                 ?: throw IllegalStateException("Відсутній атрибут full-path для OPF файлу")
 
             // 2. Читання OPF файлу
-            onProgress("Читання структури книги...")
-            val opfEntry = findZipEntry(zip, opfPath)
-                ?: throw IllegalStateException("Не знайдено OPF файл: $opfPath")
+            val opfFile = findFile(extractDir, opfRelativePath)
+                ?: throw IllegalStateException("Не знайдено OPF файл: $opfRelativePath")
 
-            val opfDoc = zip.getInputStream(opfEntry).use { docBuilder.parse(it) }
+            val opfDoc = opfFile.inputStream().use { docBuilder.parse(it) }
 
             // Заголовок книги
             val titleNodeList = opfDoc.getElementsByTagName("dc:title")
@@ -94,7 +185,7 @@ object EpubParser {
                 }
             }
 
-            // Spine (порядок читання)
+            // Spine (порядок читання розділів)
             val spineNodes = opfDoc.getElementsByTagName("itemref")
             val spine = mutableListOf<String>()
             for (i in 0 until spineNodes.length) {
@@ -111,13 +202,19 @@ object EpubParser {
 
             for ((index, idref) in spine.withIndex()) {
                 val href = manifest[idref] ?: continue
-                val fullChapterPath = resolvePath(opfPath, href)
-                val chapterEntry = findZipEntry(zip, fullChapterPath) ?: continue
+                val fullChapterPath = resolvePath(opfRelativePath, href)
+                val chapterFile = findFile(extractDir, fullChapterPath) ?: continue
 
                 onProgress("Обробка розділу ${index + 1} з $totalSections...")
 
-                val rawHtml = zip.getInputStream(chapterEntry).bufferedReader(Charsets.UTF_8).use {
-                    it.readText()
+                val rawHtml = try {
+                    chapterFile.readText(Charsets.UTF_8)
+                } catch (e: Exception) {
+                    try {
+                        chapterFile.readText(Charsets.ISO_8859_1)
+                    } catch (e2: Exception) {
+                        ""
+                    }
                 }
 
                 val cleanText = cleanHtmlContent(rawHtml)
@@ -140,25 +237,58 @@ object EpubParser {
                 totalCharacters = fullText.length
             )
         } finally {
+            // Очищення тимчасової папки розпакування
+            extractDir.deleteRecursively()
+        }
+    }
+
+    private fun unpackViaZipFile(zipFile: File, targetDir: File) {
+        val zip = ZipFile(zipFile)
+        try {
+            val entries = zip.entries()
+            while (entries.hasMoreElements()) {
+                val entry = entries.nextElement()
+                val cleanName = entry.name.replace('\\', '/').trim().removePrefix("/")
+                if (cleanName.isNotBlank()) {
+                    val outFile = File(targetDir, cleanName)
+                    if (outFile.canonicalPath.startsWith(targetDir.canonicalPath)) {
+                        if (entry.isDirectory) {
+                            outFile.mkdirs()
+                        } else {
+                            outFile.parentFile?.mkdirs()
+                            zip.getInputStream(entry).use { input ->
+                                FileOutputStream(outFile).use { output ->
+                                    input.copyTo(output)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } finally {
             zip.close()
         }
     }
 
-    private fun findZipEntry(zip: ZipFile, path: String): ZipEntry? {
-        val normalized = path.trim().removePrefix("/")
-        val decoded = try {
-            URLDecoder.decode(normalized, "UTF-8")
+    private fun findFile(baseDir: File, relativePath: String): File? {
+        val cleanPath = relativePath.replace('\\', '/').trim().removePrefix("/")
+        val decodedPath = try {
+            URLDecoder.decode(cleanPath, "UTF-8")
         } catch (e: Exception) {
-            normalized
+            cleanPath
         }
 
-        return zip.getEntry(normalized)
-            ?: zip.getEntry(decoded)
-            ?: zip.getEntry(normalized.replace('/', '\\'))
-            ?: zip.entries().asSequence().firstOrNull {
-                it.name.equals(normalized, ignoreCase = true) ||
-                it.name.equals(decoded, ignoreCase = true)
-            }
+        // 1. Точний збіг
+        val f1 = File(baseDir, cleanPath)
+        if (f1.exists() && f1.isFile) return f1
+
+        // 2. Декодований URL
+        val f2 = File(baseDir, decodedPath)
+        if (f2.exists() && f2.isFile) return f2
+
+        // 3. Нечутливий до регістру пошук
+        val targetName = File(decodedPath).name
+        return baseDir.walkTopDown().firstOrNull { it.isFile && it.name.equals(targetName, ignoreCase = true) }
     }
 
     private fun resolvePath(basePath: String, relativePath: String): String {
