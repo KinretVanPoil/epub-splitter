@@ -1,0 +1,21 @@
+<resources>
+    <string name="app_name">EPUB Splitter</string>
+    <string name="open_book">Відкрити EPUB</string>
+    <string name="change_book">Змінити книгу</string>
+    <string name="close_book">Закрити книгу</string>
+    <string name="page_format">Сторінка %1$d з %2$d</string>
+    <string name="copy_chunk">Копіювати 15k</string>
+    <string name="copied_toast">Скопійовано %1$d символів у буфер обміну!</string>
+    <string name="prev_page">Попередня</string>
+    <string name="next_page">Наступна</string>
+    <string name="settings">Налаштування</string>
+    <string name="font_size">Розмір шрифту</string>
+    <string name="theme">Тема</string>
+    <string name="theme_light">Світла</string>
+    <string name="theme_sepia">Сепія</string>
+    <string name="theme_dark">Темна</string>
+    <string name="keep_screen_on">Не вимикати екран</string>
+    <string name="jump_to_page">Перейти до сторінки</string>
+    <string name="jump_confirm">Перейти</string>
+    <string name="cancel">Скасувати</string>
+</resources>
